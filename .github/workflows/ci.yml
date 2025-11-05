@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+        override: true
+
+    - name: Install Rust Nightly
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+        components: rust-src
+        override: false
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y clang llvm libbpf-dev build-essential
+
+    - name: Install bpf-linker
+      run: cargo +nightly install bpf-linker --locked
+
+    - name: Build eBPF programs
+      run: |
+        cd ebpf-detector-ebpf
+        cargo +nightly build -Zbuild-std=core --release --target bpfel-unknown-none
+
+    - name: Build C eBPF programs
+      run: |
+        cd ebpf-detector-ebpf-c
+        make
+
+    - name: Build agent
+      run: cargo build --release --bin ebpf-detector-agent
+
+    - name: Build CLI
+      run: cargo build --release --bin ebpf-detector
+
+    - name: Run tests
+      run: cargo test --release
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+
+    - name: Clippy
+      run: cargo clippy -- -D warnings
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: stable
+
+    - name: Run Clippy
+      uses: actions-rs/cargo@v1
+      with:
+        command: clippy
+        args: -- -D warnings
+
+    - name: Check formatting
+      run: cargo fmt -- --check
+

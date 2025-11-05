@@ -1,0 +1,41 @@
+[Unit]
+Description=eBPF Security Monitor Agent
+Documentation=https://github.com/yourorg/secrds
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ebpf-detector-agent
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+
+# Security settings
+User=root
+Group=root
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE
+AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_SYS_RESOURCE
+NoNewPrivileges=false
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ebpf-detector /var/run /sys/fs/bpf
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Environment
+Environment="RUST_LOG=info"
+EnvironmentFile=-/etc/ebpf-detector/env.conf
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ebpf-detector
+
+[Install]
+WantedBy=multi-user.target
+

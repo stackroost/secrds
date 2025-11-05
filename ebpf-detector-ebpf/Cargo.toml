@@ -1,0 +1,20 @@
+[package]
+name = "ebpf-detector-ebpf"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+lto = true
+
+[target.bpfel-unknown-none]
+runner = "echo"
+
+[dependencies]
+aya-ebpf = { workspace = true }
+aya-log-ebpf = { workspace = true }
+

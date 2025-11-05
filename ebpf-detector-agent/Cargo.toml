@@ -1,0 +1,27 @@
+[package]
+name = "ebpf-detector-agent"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ebpf-detector-agent"
+path = "src/main.rs"
+
+[dependencies]
+aya = { workspace = true, features = ["async_tokio"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
+libc = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+chrono = { workspace = true }
+ipnetwork = { workspace = true }
+ipnet = { workspace = true }
+toml = { workspace = true }
+
