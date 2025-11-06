@@ -6,6 +6,15 @@ set -e
 # Check if running as root
 if [ "$EUID" -eq 0 ]; then
     SUDO=""
+else
+    SUDO="sudo"
+fi
+
+echo "Clearing all secrds logs and storage..."
+
+# Stop service
+$SUDO systemctl stop secrds 2>/dev/null || true
+
 # Clear storage
 $SUDO rm -f /var/lib/secrds/events.json
 $SUDO mkdir -p /var/lib/secrds
