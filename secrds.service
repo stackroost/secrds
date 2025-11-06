@@ -13,6 +13,9 @@ Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
 
+# Ensure service stays running
+RemainAfterExit=no
+
 # Security settings
 User=root
 Group=root
