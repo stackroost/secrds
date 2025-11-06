@@ -62,25 +62,17 @@ int ssh_kprobe_accept(struct pt_regs *ctx)
         return 0;
     }
     
-    // Read source IP (skc_rcv_saddr) - offset 4-7 in sock_common
-    bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + 4);
+    // For incoming connections on the server:
+    // - skc_daddr (offset 0) = the remote client's IP address (what we want to track!)
+    // - skc_rcv_saddr (offset 4) = the server's bound local address (usually 0.0.0.0 or server IP)
+    // - skc_dport (offset 8) = destination port (22 for SSH)
+    
+    // Read the remote client's IP directly from skc_daddr (offset 0-3)
+    // This is the IP of whoever is connecting TO the server
+    bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + 0);
     src_ip = __builtin_bswap32(src_ip);
     
-    // Read destination IP (skc_daddr) - offset 0-3 in sock_common
-    bpf_probe_read_kernel(&dst_ip, sizeof(__u32), (char *)sk + 0);
-    dst_ip = __builtin_bswap32(dst_ip);
-    
-    // For incoming connections, skc_rcv_saddr is the local bound address (usually 0.0.0.0 or server IP)
-    // and skc_daddr is the remote client's IP (what we want!)
-    // So we should use skc_daddr as the source IP for tracking
-    
-    // Use destination address (skc_daddr) as the source IP for incoming connections
-    // This is the IP of the client connecting to us
-    if (dst_ip != 0) {
-        src_ip = dst_ip;  // The "destination" from socket perspective is the client connecting to us
-    }
-    
-    // If we still don't have a valid IP, skip
+    // If we don't have a valid client IP, skip
     if (src_ip == 0) {
         return 0;
     }

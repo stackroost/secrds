@@ -99,8 +99,15 @@ func (ep *EventProcessor) processSSHEvents(reader *perf.Reader) {
 			Timestamp: binary.LittleEndian.Uint64(record.RawSample[16:24]),
 		}
 
+		// Convert IP to string for logging
+		ipStr := fmt.Sprintf("%d.%d.%d.%d", 
+			byte(event.IP>>24), byte(event.IP>>16), byte(event.IP>>8), byte(event.IP))
+		
 		if err := ep.detector.ProcessSSHEvent(event.IP, event.Port, event.PID, event.EventType); err != nil {
-			fmt.Printf("Failed to process SSH event: %v\n", err)
+			fmt.Printf("Failed to process SSH event from %s: %v\n", ipStr, err)
+		} else {
+			// Log successful event processing (for debugging)
+			fmt.Printf("Processed SSH event: IP=%s, Port=%d\n", ipStr, event.Port)
 		}
 	}
 }
