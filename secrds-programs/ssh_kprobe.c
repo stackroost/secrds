@@ -14,27 +14,94 @@ struct {
     __uint(max_entries, MAX_IP_ADDRESSES);
     __uint(key_size, sizeof(__u32));
     __uint(value_size, sizeof(__u64));
-} ssh_failure_count SEC(".maps");
-
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, MAX_IP_ADDRESSES);
-    __uint(key_size, sizeof(__u32));
-    __uint(value_size, sizeof(__u64));
 } ssh_attempts SEC(".maps");
 
-// sockaddr_in structure (simplified for IPv4)
-struct sockaddr_in {
-    __u16 sin_family;      // AF_INET = 2
-    __be16 sin_port;       // Port in network byte order
-    struct in_addr {
-        __be32 s_addr;      // IP address in network byte order
-    } sin_addr;
-    __u8 sin_zero[8];      // Padding
-};
+// Hook into inet_csk_accept to detect incoming SSH connections on the server side
+// This is called when the server accepts a new connection
+SEC("kprobe/inet_csk_accept")
+int ssh_kprobe_accept(struct pt_regs *ctx)
+{
+    struct sock *sk = (struct sock *)PT_REGS_RC(ctx);
+    
+    if (!sk) return 0;
+    
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = (__u32)(pid_tgid >> 32);
+    
+    // Try to read socket information
+    // For IPv4 sockets, we need to access inet_sock structure
+    // Common structure layout:
+    // struct inet_sock {
+    //   struct sock sk;
+    //   ...
+    //   __be16 inet_sport;  // source port
+    //   __be16 inet_dport;  // destination port  
+    //   __be32 inet_saddr;  // source address
+    //   __be32 inet_daddr;  // destination address
+    // }
+    
+    __u32 src_ip = 0;
+    __u32 dst_ip = 0;
+    __u16 src_port = 0;
+    __u16 dst_port = 0;
+    
+    // Try to read destination port (offset varies by kernel, try common ones)
+    // inet_sock->inet_dport is typically around offset 72-80 from sock
+    bpf_probe_read_kernel(&dst_port, sizeof(dst_port), (char *)sk + 72);
+    dst_port = __builtin_bswap16(dst_port);
+    
+    // Only process SSH connections (port 22)
+    if (dst_port != 22) {
+        return 0;
+    }
+    
+    // Try to read source IP (inet_saddr, typically offset 64-68)
+    bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 64);
+    src_ip = __builtin_bswap32(src_ip);
+    
+    // Try alternative offsets if first attempt failed
+    if (src_ip == 0) {
+        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 68);
+        src_ip = __builtin_bswap32(src_ip);
+    }
+    if (src_ip == 0) {
+        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 60);
+        src_ip = __builtin_bswap32(src_ip);
+    }
+    
+    // Read destination IP
+    bpf_probe_read_kernel(&dst_ip, sizeof(dst_ip), (char *)sk + 56);
+    dst_ip = __builtin_bswap32(dst_ip);
+    if (dst_ip == 0) {
+        bpf_probe_read_kernel(&dst_ip, sizeof(dst_ip), (char *)sk + 52);
+        dst_ip = __builtin_bswap32(dst_ip);
+    }
+    
+    // If we still don't have source IP, skip (invalid socket)
+    if (src_ip == 0) {
+        return 0;
+    }
+    
+    // Track attempt
+    __u64 *count = bpf_map_lookup_elem(&ssh_attempts, &src_ip);
+    __u64 new_count = count ? *count + 1 : 1;
+    bpf_map_update_elem(&ssh_attempts, &src_ip, &new_count, BPF_F_CURRENT_CPU);
+    
+    // Initialize event structure
+    struct ssh_event event = {};
+    event.ip = src_ip;
+    event.port = dst_port;
+    event.pid = pid;
+    event.event_type = SSH_ATTEMPT;
+    event.timestamp = bpf_ktime_get_ns();
+    
+    bpf_perf_event_output(ctx, &ssh_events, BPF_F_CURRENT_CPU, &event, sizeof(event));
+    
+    return 0;
+}
 
-// Hook into tcp_v4_connect to detect SSH connection attempts
-// tcp_v4_connect signature: int tcp_v4_connect(struct sock *sk, struct sockaddr *uaddr, int addr_len)
+// Also hook tcp_v4_connect for outgoing connections (in case server connects out)
+// This helps track both directions
 SEC("kprobe/tcp_v4_connect")
 int ssh_kprobe_tcp_connect(struct pt_regs *ctx)
 {
@@ -63,22 +130,25 @@ int ssh_kprobe_tcp_connect(struct pt_regs *ctx)
         return 0;
     }
     
-    // Get destination IP (we'll use this, but for source IP we need to read from socket)
+    // Get destination IP
     __u32 dst_ip = __builtin_bswap32(addr.sin_addr.s_addr);
     
-    // Try to get source IP from socket structure
-    // Common offsets for skc_rcv_saddr in sock_common (varies by kernel version)
+    // For outgoing connections, the "source" from our perspective is the destination
+    // We want to track who we're connecting TO (for server-initiated connections)
+    // But for incoming connections, we use inet_csk_accept
+    
+    // Try to get source IP from socket
     __u32 src_ip = 0;
     
-    // Try reading from common offsets (these are approximate and may need adjustment)
-    // Offset 12-16 are common locations for source address in sock_common
-    bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 12);
+    // Read from inet_sock structure (common offsets)
+    bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 64);
+    src_ip = __builtin_bswap32(src_ip);
     if (src_ip == 0) {
-        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 16);
+        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 68);
+        src_ip = __builtin_bswap32(src_ip);
     }
     
-    // If we still don't have source IP, use destination IP as fallback
-    // (This means we're tracking the connection target, not the source)
+    // Use destination IP if source IP not available (outgoing connection)
     if (src_ip == 0) {
         src_ip = dst_ip;
     }
@@ -86,7 +156,7 @@ int ssh_kprobe_tcp_connect(struct pt_regs *ctx)
     // Track attempt
     __u64 *count = bpf_map_lookup_elem(&ssh_attempts, &src_ip);
     __u64 new_count = count ? *count + 1 : 1;
-    bpf_map_update_elem(&ssh_attempts, &src_ip, &new_count, BPF_ANY);
+    bpf_map_update_elem(&ssh_attempts, &src_ip, &new_count, BPF_F_CURRENT_CPU);
     
     // Initialize event structure
     struct ssh_event event = {};
@@ -101,25 +171,4 @@ int ssh_kprobe_tcp_connect(struct pt_regs *ctx)
     return 0;
 }
 
-// Also hook IPv6 connections
-SEC("kprobe/tcp_v6_connect")
-int ssh_kprobe_tcp_v6_connect(struct pt_regs *ctx)
-{
-    // Similar to IPv4, but for IPv6
-    // For now, we'll focus on IPv4, but this can be extended
-    return 0;
-}
-
-// Track failed connections via return probe
-SEC("kretprobe/tcp_v4_connect")
-int ssh_kretprobe_tcp_connect(struct pt_regs *ctx)
-{
-    // If connection failed (negative return), we could track it here
-    // But we need the socket/IP info which is harder to get from kretprobe
-    // For now, we'll track all connection attempts and let user-space
-    // correlate with auth logs for actual failures
-    return 0;
-}
-
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
-

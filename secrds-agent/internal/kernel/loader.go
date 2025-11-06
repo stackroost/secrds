@@ -80,7 +80,19 @@ func (l *Loader) LoadCPrograms() error {
 	}
 	l.collection = coll
 
-	// Attach kprobe for tcp_v4_connect
+	// Attach kprobe for inet_csk_accept (incoming connections on server)
+	if acceptProg := coll.Programs["ssh_kprobe_accept"]; acceptProg != nil {
+		kpAccept, err := link.Kprobe("inet_csk_accept", acceptProg, nil)
+		if err != nil {
+			fmt.Printf("Warning: failed to attach kprobe inet_csk_accept: %v\n", err)
+			fmt.Printf("This is normal if kernel doesn't export this symbol. Trying alternative...\n")
+		} else {
+			l.links = append(l.links, kpAccept)
+			fmt.Println("Attached kprobe to inet_csk_accept (incoming connections)")
+		}
+	}
+
+	// Attach kprobe for tcp_v4_connect (outgoing connections)
 	// Try different possible program names
 	progNames := []string{"ssh_kprobe_tcp_connect", "ssh_kprobe_execve", "ssh_tracepoint_write"}
 	var kprobeProg *ebpf.Program
@@ -107,18 +119,7 @@ func (l *Loader) LoadCPrograms() error {
 		return fmt.Errorf("failed to attach kprobe tcp_v4_connect: %w", err)
 	}
 	l.links = append(l.links, kp)
-	fmt.Println("Attached kprobe to tcp_v4_connect")
-
-	// Attach kretprobe if available
-	if prog := coll.Programs["ssh_kretprobe_tcp_connect"]; prog != nil {
-		krp, err := link.Kretprobe("tcp_v4_connect", prog, nil)
-		if err != nil {
-			fmt.Printf("Warning: failed to attach kretprobe: %v\n", err)
-		} else {
-			l.links = append(l.links, krp)
-			fmt.Println("Attached kretprobe to tcp_v4_connect")
-		}
-	}
+	fmt.Println("Attached kprobe to tcp_v4_connect (outgoing connections)")
 
 	// Open perf event array for SSH events
 	sshMap := coll.Maps["ssh_events"]
