@@ -22,6 +22,9 @@ type Alert struct {
 	ThreatType  ThreatType `json:"threat_type"`
 	Count       uint64    `json:"count"`
 	Timestamp   time.Time `json:"timestamp"`
+	Severity    string    `json:"severity,omitempty"`
+	Details     string    `json:"details,omitempty"`
+	Score       float64   `json:"score,omitempty"`
 }
 
 type Statistics struct {

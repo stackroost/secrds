@@ -67,12 +67,26 @@ mkdir -p "$DATA_DIR"
 mkdir -p "$RUN_DIR"
 mkdir -p "$(dirname $INSTALL_PREFIX/bin)"
 
+# Stop service if running (to avoid "Text file busy" error)
+SERVICE_WAS_RUNNING=false
+if systemctl is-active --quiet secrds 2>/dev/null; then
+    echo -e "${YELLOW}Stopping secrds service to update binaries...${NC}"
+    systemctl stop secrds
+    SERVICE_WAS_RUNNING=true
+    sleep 1
+fi
+
 # Install binaries
 echo -e "${YELLOW}Installing binaries...${NC}"
 
 # Install secrds-agent
 if [ -f "target/release/secrds-agent" ]; then
-    cp target/release/secrds-agent "$INSTALL_PREFIX/bin/secrds-agent"
+    # Try to copy, if it fails due to busy file, wait and retry
+    if ! cp target/release/secrds-agent "$INSTALL_PREFIX/bin/secrds-agent" 2>/dev/null; then
+        echo -e "${YELLOW}Waiting for file to be released...${NC}"
+        sleep 2
+        cp target/release/secrds-agent "$INSTALL_PREFIX/bin/secrds-agent"
+    fi
     chmod +x "$INSTALL_PREFIX/bin/secrds-agent"
     echo -e "${GREEN}Installed secrds-agent${NC}"
 else
@@ -145,14 +159,69 @@ chown -R root:root "$CONFIG_DIR"
 chown -R root:root "$DATA_DIR"
 chmod 755 "$DATA_DIR"
 
+# Enable service
+echo -e "${YELLOW}Enabling secrds service...${NC}"
+if systemctl is-enabled secrds &>/dev/null; then
+    echo -e "${GREEN}Service already enabled${NC}"
+else
+    systemctl enable secrds
+    echo -e "${GREEN}Service enabled for auto-start${NC}"
+fi
+
+# Reload systemd to pick up any service file changes
+systemctl daemon-reload
+
+# Check if config has Telegram credentials
+if grep -q "your_bot_token_here\|your_chat_id_here" "$CONFIG_DIR/config.yaml" 2>/dev/null; then
+    echo -e "${YELLOW}Warning: Telegram credentials not configured yet${NC}"
+    echo -e "${YELLOW}The service will start but alerts won't be sent to Telegram${NC}"
+    echo ""
+    echo -e "${YELLOW}To start the service now, run:${NC}"
+    echo "  systemctl start secrds"
+    echo ""
+    echo -e "${YELLOW}To configure Telegram later:${NC}"
+    echo "  1. Edit $CONFIG_DIR/config.yaml"
+    echo "  2. Set telegram.bot_token and telegram.chat_id"
+    echo "  3. Restart: systemctl restart secrds"
+else
+    # Start or restart the service if config is ready
+    if [ "$SERVICE_WAS_RUNNING" = true ]; then
+        echo -e "${YELLOW}Restarting service...${NC}"
+        if systemctl start secrds; then
+            sleep 2
+            if systemctl is-active --quiet secrds; then
+                echo -e "${GREEN}Service restarted successfully${NC}"
+            else
+                echo -e "${YELLOW}Service restarted but may have issues. Check: systemctl status secrds${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Failed to restart service. Check: systemctl status secrds${NC}"
+        fi
+    else
+        # Start the service if config is ready
+        if systemctl start secrds; then
+            sleep 2
+            if systemctl is-active --quiet secrds; then
+                echo -e "${GREEN}Service started successfully${NC}"
+            else
+                echo -e "${YELLOW}Service started but may have issues. Check: systemctl status secrds${NC}"
+            fi
+        else
+            echo -e "${YELLOW}Failed to start service. Check: systemctl status secrds${NC}"
+        fi
+    fi
+fi
+
+echo ""
 echo -e "${GREEN}Installation complete!${NC}"
 echo ""
-echo -e "${YELLOW}Next steps:${NC}"
-echo "1. Edit $CONFIG_DIR/config.yaml and set telegram.bot_token and telegram.chat_id"
-echo "2. Optionally edit $CONFIG_DIR/config.yaml to customize thresholds"
-echo "3. Start the service: systemctl start secrds"
-echo "4. Enable auto-start: systemctl enable secrds"
-echo "5. Check status: systemctl status secrds"
+echo -e "${YELLOW}Useful commands:${NC}"
+echo "  Check status:  systemctl status secrds"
+echo "  View logs:     journalctl -u secrds -f"
+echo "  Stop service:  systemctl stop secrds"
+echo "  Start service: systemctl start secrds"
+echo "  Restart:       systemctl restart secrds"
+echo "  View alerts:   secrds alerts"
 echo ""
 echo -e "${GREEN}Installation successful!${NC}"
 

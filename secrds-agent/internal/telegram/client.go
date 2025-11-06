@@ -101,17 +101,45 @@ func (c *Client) formatAlert(alert *Alert) string {
 		threatName = "TCP Flood"
 	}
 
-	return fmt.Sprintf(
-		"*Security Alert*\n\n"+
+	// Determine severity emoji
+	severityEmoji := "⚠️"
+	if alert.Severity != "" {
+		switch alert.Severity {
+		case "CRITICAL":
+			severityEmoji = "🚨"
+		case "HIGH":
+			severityEmoji = "🔴"
+		case "MEDIUM":
+			severityEmoji = "🟠"
+		case "LOW":
+			severityEmoji = "🟡"
+		}
+	}
+
+	message := fmt.Sprintf(
+		"%s *Security Alert*\n\n"+
 			"*Threat Type:* %s\n"+
-			"*Source IP:* %s\n"+
+			"*Severity:* %s\n"+
+			"*Source IP:* `%s`\n"+
 			"*Attempt Count:* %d\n"+
 			"*Timestamp:* %s",
+		severityEmoji,
 		threatName,
+		alert.Severity,
 		alert.IP,
 		alert.Count,
 		alert.Timestamp.Format("2006-01-02 15:04:05 UTC"),
 	)
+
+	if alert.Details != "" {
+		message += fmt.Sprintf("\n*Details:* %s", alert.Details)
+	}
+
+	if alert.Score > 0 {
+		message += fmt.Sprintf("\n*Threat Score:* %.1f", alert.Score)
+	}
+
+	return message
 }
 
 type Alert struct {
@@ -119,5 +147,8 @@ type Alert struct {
 	ThreatType string
 	Count      uint64
 	Timestamp  time.Time
+	Severity   string
+	Details    string
+	Score      float64
 }
 
