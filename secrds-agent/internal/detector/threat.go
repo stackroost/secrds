@@ -83,6 +83,12 @@ func (td *ThreatDetector) ProcessSSHEvent(ip uint32, port uint16, pid uint32, ev
 	ipAddr := u32ToIP(ip)
 	ipStr := ipAddr.String()
 
+	// Skip invalid IPs (0.0.0.0 or invalid)
+	if ip == 0 || ipStr == "0.0.0.0" {
+		fmt.Printf("[DEBUG] Skipping invalid IP: %s\n", ipStr)
+		return nil
+	}
+
 	// Check if already blocked
 	if td.storage.IsBlocked(ipStr) {
 		return nil
@@ -223,8 +229,15 @@ func (td *ThreatDetector) detectSSHThreats(ip string, behavior *IPBehavior, now 
 	failedInShort := td.countFailedInWindow(behavior.SSHEvents, now, shortWindow)
 	failedInMedium := td.countFailedInWindow(behavior.SSHEvents, now, mediumWindow)
 
+	// Use config threshold for detection
+	threshold := td.config.SSHThreshold
+	if threshold == 0 {
+		threshold = 3 // Default fallback
+	}
+
 	// Pattern 1: Rapid brute force attack (high frequency in short window)
-	if shortTerm >= 10 || (shortTerm >= 5 && failedInShort >= 5) {
+	// Critical: 2x threshold in 1 minute
+	if shortTerm >= threshold*2 || (shortTerm >= threshold && failedInShort >= threshold) {
 		threats = append(threats, ThreatInfo{
 			ThreatType: storage.ThreatTypeSSHBruteForce,
 			Severity:   SeverityCritical,
@@ -232,7 +245,8 @@ func (td *ThreatDetector) detectSSHThreats(ip string, behavior *IPBehavior, now 
 			Details:    fmt.Sprintf("Rapid brute force: %d attempts in 1 minute", shortTerm),
 			Score:      score,
 		})
-	} else if mediumTerm >= 15 || (mediumTerm >= 10 && failedInMedium >= 10) {
+	} else if mediumTerm >= threshold*3 || (mediumTerm >= threshold*2 && failedInMedium >= threshold*2) {
+		// High: 3x threshold in 5 minutes
 		threats = append(threats, ThreatInfo{
 			ThreatType: storage.ThreatTypeSSHBruteForce,
 			Severity:   SeverityHigh,
@@ -240,12 +254,22 @@ func (td *ThreatDetector) detectSSHThreats(ip string, behavior *IPBehavior, now 
 			Details:    fmt.Sprintf("Sustained brute force: %d attempts in 5 minutes", mediumTerm),
 			Score:      score,
 		})
-	} else if longTerm >= 20 {
+	} else if mediumTerm >= threshold {
+		// Medium: threshold or more in 5 minutes
 		threats = append(threats, ThreatInfo{
 			ThreatType: storage.ThreatTypeSSHBruteForce,
 			Severity:   SeverityMedium,
+			Count:      mediumTerm,
+			Details:    fmt.Sprintf("Brute force detected: %d attempts in 5 minutes", mediumTerm),
+			Score:      score,
+		})
+	} else if longTerm >= threshold {
+		// Low: threshold or more in 15 minutes
+		threats = append(threats, ThreatInfo{
+			ThreatType: storage.ThreatTypeSSHBruteForce,
+			Severity:   SeverityLow,
 			Count:      longTerm,
-			Details:    fmt.Sprintf("Persistent brute force: %d attempts in 15 minutes", longTerm),
+			Details:    fmt.Sprintf("Suspicious activity: %d attempts in 15 minutes", longTerm),
 			Score:      score,
 		})
 	}
@@ -475,10 +499,10 @@ func (td *ThreatDetector) detectSequentialPortScan(conns []TCPConnectionDetail) 
 }
 
 func (td *ThreatDetector) handleThreat(ip string, threat ThreatInfo) error {
-	// Only alert if severity is MEDIUM or higher, or if score is significant
-	if threat.Severity == SeverityLow && threat.Score < 10 {
-		return nil
-	}
+	// Alert on all threats (including LOW severity for testing/debugging)
+	// In production, you might want to filter LOW severity threats
+	fmt.Printf("[DEBUG] Threat detected: IP=%s, Type=%s, Severity=%s, Count=%d, Score=%.1f\n",
+		ip, threat.ThreatType, threat.Severity, threat.Count, threat.Score)
 
 	alert := &storage.Alert{
 		IP:         ip,

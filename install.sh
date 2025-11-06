@@ -16,10 +16,17 @@ RUN_DIR="/var/run"
 
 echo -e "${GREEN}Installing secrds Security Monitor${NC}"
 
-# Check if running as root
+# Check if running as root or has sudo
 if [ "$EUID" -ne 0 ]; then 
-    echo -e "${RED}Please run as root (use sudo)${NC}"
-    exit 1
+    if ! command -v sudo &> /dev/null; then
+        echo -e "${RED}Please run as root or install sudo${NC}"
+        exit 1
+    fi
+    # Not root, will use sudo
+    SUDO_CMD="sudo"
+else
+    # Already root, no sudo needed
+    SUDO_CMD=""
 fi
 
 # Check prerequisites

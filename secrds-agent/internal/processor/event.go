@@ -99,6 +99,12 @@ func (ep *EventProcessor) processSSHEvents(reader *perf.Reader) {
 			Timestamp: binary.LittleEndian.Uint64(record.RawSample[16:24]),
 		}
 
+		// Debug: Log received events (can be disabled in production)
+		ipStr := fmt.Sprintf("%d.%d.%d.%d", 
+			byte(event.IP>>24), byte(event.IP>>16), byte(event.IP>>8), byte(event.IP))
+		fmt.Printf("[DEBUG] SSH event received: IP=%s, Port=%d, PID=%d, Type=%d\n", 
+			ipStr, event.Port, event.PID, event.EventType)
+
 		if err := ep.detector.ProcessSSHEvent(event.IP, event.Port, event.PID, event.EventType); err != nil {
 			fmt.Printf("Failed to process SSH event: %v\n", err)
 		}
