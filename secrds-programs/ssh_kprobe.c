@@ -38,52 +38,72 @@ int ssh_kprobe_accept(struct pt_regs *ctx)
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = (__u32)(pid_tgid >> 32);
     
-    // Try to read socket information
-    // For IPv4 sockets, we need to access inet_sock structure
-    // Common structure layout:
-    // struct inet_sock {
-    //   struct sock sk;
-    //   ...
-    //   __be16 inet_sport;  // source port
-    //   __be16 inet_dport;  // destination port  
-    //   __be32 inet_saddr;  // source address
-    //   __be32 inet_daddr;  // destination address
-    // }
-    
     __u32 src_ip = 0;
     __u32 dst_ip = 0;
     __u16 dst_port = 0;
+    __u16 src_port = 0;
     
-    // Try to read destination port (offset varies by kernel, try common ones)
-    // inet_sock->inet_dport is typically around offset 72-80 from sock
-    bpf_probe_read_kernel(&dst_port, sizeof(dst_port), (char *)sk + 72);
-    dst_port = __builtin_bswap16(dst_port);
+    // Try multiple offsets for destination port (inet_dport)
+    // Offset varies significantly by kernel version (5.15 uses different offsets than 5.8)
+    // Common offsets: 70, 72, 74, 76, 78, 80, 82, 84, 86
+    // For kernel 5.15, inet_dport might be at offset 76-80
+    for (int offset = 70; offset <= 86; offset += 2) {
+        bpf_probe_read_kernel(&dst_port, sizeof(__u16), (char *)sk + offset);
+        dst_port = __builtin_bswap16(dst_port);
+        if (dst_port == 22) {
+            break;
+        }
+        dst_port = 0; // Reset if not found
+    }
     
     // Only process SSH connections (port 22)
     if (dst_port != 22) {
         return 0;
     }
     
-    // Try to read source IP (inet_saddr, typically offset 64-68)
-    bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 64);
-    src_ip = __builtin_bswap32(src_ip);
-    
-    // Try alternative offsets if first attempt failed
-    if (src_ip == 0) {
-        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 68);
+    // Try multiple offsets for source IP (inet_saddr)
+    // For kernel 5.15, offsets might be different
+    // Try inet_sock offsets first: 56, 60, 64, 68, 72, 76, 80
+    for (int offset = 56; offset <= 80; offset += 4) {
+        bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + offset);
         src_ip = __builtin_bswap32(src_ip);
-    }
-    if (src_ip == 0) {
-        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 60);
-        src_ip = __builtin_bswap32(src_ip);
+        // Accept any non-zero IP (including 127.0.0.1)
+        if (src_ip != 0) {
+            break;
+        }
     }
     
-    // Read destination IP
-    bpf_probe_read_kernel(&dst_ip, sizeof(dst_ip), (char *)sk + 56);
-    dst_ip = __builtin_bswap32(dst_ip);
-    if (dst_ip == 0) {
-        bpf_probe_read_kernel(&dst_ip, sizeof(dst_ip), (char *)sk + 52);
+    // If we still don't have source IP, try reading from sock_common
+    // skc_rcv_saddr is typically at offset 20-28 in sock_common (which is at start of sock)
+    if (src_ip == 0) {
+        for (int offset = 20; offset <= 32; offset += 4) {
+            bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + offset);
+            src_ip = __builtin_bswap32(src_ip);
+            if (src_ip != 0) {
+                break;
+            }
+        }
+    }
+    
+    // Last resort: try reading from skc_daddr (destination address in sock_common)
+    // Sometimes the source is stored where we expect destination
+    if (src_ip == 0) {
+        for (int offset = 24; offset <= 36; offset += 4) {
+            bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + offset);
+            src_ip = __builtin_bswap32(src_ip);
+            if (src_ip != 0 && src_ip != 0x0100007f) { // Skip 127.0.0.1 here as it might be dst
+                break;
+            }
+        }
+    }
+    
+    // Read destination IP (inet_daddr) - try multiple offsets
+    for (int offset = 52; offset <= 72; offset += 4) {
+        bpf_probe_read_kernel(&dst_ip, sizeof(__u32), (char *)sk + offset);
         dst_ip = __builtin_bswap32(dst_ip);
+        if (dst_ip != 0) {
+            break;
+        }
     }
     
     // If we still don't have source IP, skip (invalid socket)
@@ -109,8 +129,8 @@ int ssh_kprobe_accept(struct pt_regs *ctx)
     return 0;
 }
 
-// Also hook tcp_v4_connect for outgoing connections (in case server connects out)
-// This helps track both directions
+// Also hook tcp_v4_connect for outgoing connections
+// This is more reliable as we have sockaddr_in with destination info
 SEC("kprobe/tcp_v4_connect")
 int ssh_kprobe_tcp_connect(struct pt_regs *ctx)
 {
@@ -142,24 +162,44 @@ int ssh_kprobe_tcp_connect(struct pt_regs *ctx)
     // Get destination IP
     __u32 dst_ip = __builtin_bswap32(addr.sin_addr.s_addr);
     
-    // For outgoing connections, the "source" from our perspective is the destination
-    // We want to track who we're connecting TO (for server-initiated connections)
-    // But for incoming connections, we use inet_csk_accept
+    // For incoming connections TO this server, we want the source IP
+    // But tcp_v4_connect is called on the CLIENT side, so we need to
+    // detect when someone connects TO us (incoming)
+    // The destination IP in sockaddr is where we're connecting TO
+    // If dst_ip is our server's IP or 0.0.0.0, this might be an incoming connection
     
-    // Try to get source IP from socket
+    // Try to get source IP from socket (who is connecting)
     __u32 src_ip = 0;
     
-    // Read from inet_sock structure (common offsets)
-    bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 64);
-    src_ip = __builtin_bswap32(src_ip);
-    if (src_ip == 0) {
-        bpf_probe_read_kernel(&src_ip, sizeof(src_ip), (char *)sk + 68);
+    // Try multiple offsets for source IP
+    for (int offset = 56; offset <= 76; offset += 4) {
+        bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + offset);
         src_ip = __builtin_bswap32(src_ip);
+        if (src_ip != 0) {
+            break;
+        }
     }
     
-    // Use destination IP if source IP not available (outgoing connection)
+    // Also try sock_common offsets
+    if (src_ip == 0) {
+        for (int offset = 20; offset <= 28; offset += 4) {
+            bpf_probe_read_kernel(&src_ip, sizeof(__u32), (char *)sk + offset);
+            src_ip = __builtin_bswap32(src_ip);
+            if (src_ip != 0) {
+                break;
+            }
+        }
+    }
+    
+    // Use destination IP if source IP not available
+    // This handles the case where we can't read source IP from socket
     if (src_ip == 0) {
         src_ip = dst_ip;
+    }
+    
+    // Skip if still invalid
+    if (src_ip == 0) {
+        return 0;
     }
     
     // Track attempt
