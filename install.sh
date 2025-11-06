@@ -136,11 +136,20 @@ fi
 if [ ! -f "$CONFIG_DIR/config.yaml" ]; then
     echo -e "${YELLOW}Creating default configuration...${NC}"
     cat > "$CONFIG_DIR/config.yaml" <<EOF
-ssh_threshold: 5
-ssh_window_seconds: 300
-tcp_threshold: 10
-tcp_window_seconds: 60
-enable_ip_blocking: true
+# secrds Security Monitor Configuration
+
+# SSH Detection Settings
+ssh_threshold: 5              # Number of SSH attempts to trigger alert
+ssh_window_seconds: 300       # Time window for SSH attempts (5 minutes)
+
+# TCP Detection Settings  
+tcp_threshold: 10             # Number of TCP connections to trigger alert
+tcp_window_seconds: 60        # Time window for TCP connections (60 seconds)
+
+# IP Blocking
+enable_ip_blocking: true      # Automatically block detected threat IPs
+
+# Storage and Logging
 storage_path: "$DATA_DIR/events.json"
 pid_file: "$RUN_DIR/secrds.pid"
 log_level: "info"

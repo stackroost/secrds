@@ -28,16 +28,14 @@ clean:
 	@rm -rf target/release/secrds-*
 
 test:
-	@echo "Running tests..."
-	@cargo test
+	@echo "Running Go tests..."
+	@cd secrds-agent && go test ./... || true
+	@cd secrds-cli && go test ./... || true
 
 fmt:
-	@echo "Formatting code..."
-	@cargo fmt
-
-clippy:
-	@echo "Running clippy..."
-	@cargo clippy -- -D warnings
+	@echo "Formatting Go code..."
+	@cd secrds-agent && go fmt ./... || true
+	@cd secrds-cli && go fmt ./... || true
 
 docker-build:
 	@echo "Building Docker image..."

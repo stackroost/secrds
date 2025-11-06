@@ -100,11 +100,42 @@ secrds restart
 - Logs: `/var/log/secrds/agent.log`
 - Binaries: `/usr/local/bin/secrds-agent`, `/usr/local/bin/secrds`
 
+### Production Deployment
+
+1. **Build the project:**
+   ```bash
+   make build
+   ```
+
+2. **Install:**
+   ```bash
+   sudo ./install.sh
+   ```
+
+3. **Configure Telegram (required for alerts):**
+   ```bash
+   sudo nano /etc/secrds/config.yaml
+   # Set telegram.bot_token and telegram.chat_id
+   ```
+
+4. **Start and enable service:**
+   ```bash
+   sudo systemctl start secrds
+   sudo systemctl enable secrds
+   ```
+
+5. **Verify it's running:**
+   ```bash
+   secrds status
+   ```
+
 ### Troubleshooting
 - Kernel 5.8+ required: `uname -r`
 - Build tools: ensure `go`, `clang`, and `llvm` are installed
 - Telegram alerts: verify `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set and correct
 - IP blocking: requires `iptables` and root; see warnings in logs if a rule fails
+- View logs: `journalctl -u secrds -f`
+- Check alerts: `secrds alerts`
 
 ---
 

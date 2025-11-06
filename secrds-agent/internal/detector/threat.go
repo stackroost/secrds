@@ -85,7 +85,6 @@ func (td *ThreatDetector) ProcessSSHEvent(ip uint32, port uint16, pid uint32, ev
 
 	// Skip invalid IPs (0.0.0.0 or invalid)
 	if ip == 0 || ipStr == "0.0.0.0" {
-		fmt.Printf("[DEBUG] Skipping invalid IP: %s\n", ipStr)
 		return nil
 	}
 
@@ -499,10 +498,10 @@ func (td *ThreatDetector) detectSequentialPortScan(conns []TCPConnectionDetail) 
 }
 
 func (td *ThreatDetector) handleThreat(ip string, threat ThreatInfo) error {
-	// Alert on all threats (including LOW severity for testing/debugging)
-	// In production, you might want to filter LOW severity threats
-	fmt.Printf("[DEBUG] Threat detected: IP=%s, Type=%s, Severity=%s, Count=%d, Score=%.1f\n",
-		ip, threat.ThreatType, threat.Severity, threat.Count, threat.Score)
+	// Filter out LOW severity threats with low scores to reduce noise
+	if threat.Severity == SeverityLow && threat.Score < 5 {
+		return nil
+	}
 
 	alert := &storage.Alert{
 		IP:         ip,

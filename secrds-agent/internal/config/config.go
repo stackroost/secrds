@@ -29,9 +29,9 @@ type TelegramConfig struct {
 
 func Default() *Config {
 	return &Config{
-		SSHThreshold:     3,  // Lowered for better detection (3 attempts in 5 minutes)
+		SSHThreshold:     5,  // 5 attempts in 5 minutes triggers alert
 		SSHWindowSeconds: 300,
-		TCPThreshold:     5,  // Lowered for better detection
+		TCPThreshold:     10, // 10 connections in 60 seconds triggers alert
 		TCPWindowSeconds: 60,
 		EnableIPBlocking: true,
 		StoragePath:      "/var/lib/secrds/events.json",
