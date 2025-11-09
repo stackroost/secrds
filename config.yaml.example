@@ -1,0 +1,209 @@
+# secrds Enterprise SSH Guard Configuration
+# ============================================
+# This is a comprehensive enterprise-grade configuration file
+# Copy this to /etc/secrds/config.yaml and customize for your environment
+
+# SSH Detection Settings
+# ----------------------
+# ssh_threshold: Number of failed SSH attempts before triggering an alert
+#   Recommended: 3-5 for strict environments, 5-10 for normal
+#   Lower values = more sensitive (may increase false positives)
+ssh_threshold: 5
+
+# ssh_window_seconds: Time window for counting SSH attempts
+#   Recommended: 300 (5 minutes) for most environments
+#   Lower values = shorter detection window (more aggressive)
+ssh_window_seconds: 300
+
+# ssh_port: SSH port to monitor (default: 22)
+#   Change this if you use a non-standard SSH port
+#   Example: 2222, 2200, etc.
+ssh_port: 22
+
+# TCP Detection Settings
+# ----------------------
+# tcp_threshold: Number of TCP connections before triggering port scan alert
+#   Recommended: 10-20 for most environments
+tcp_threshold: 10
+
+# tcp_window_seconds: Time window for counting TCP connections
+#   Recommended: 60 (1 minute) for port scan detection
+tcp_window_seconds: 60
+
+# IP Blocking Settings
+# --------------------
+# enable_ip_blocking: Automatically block malicious IPs using iptables
+#   true: Enable automatic blocking (recommended for production)
+#   false: Only alert, do not block (useful for testing/monitoring)
+enable_ip_blocking: true
+
+# block_duration_seconds: How long to block an IP before auto-unblocking
+#   0: Permanent block (until manual removal)
+#   86400: 24 hours (recommended default)
+#   3600: 1 hour (for testing)
+#   604800: 7 days (for aggressive blocking)
+#   Note: Set to 0 for permanent blocks (not recommended for production)
+block_duration_seconds: 86400
+
+# IP Whitelist
+# ------------
+# whitelist_ips: List of IP addresses that should NEVER be blocked
+#   Add IPs for:
+#   - Monitoring systems
+#   - VPN gateways
+#   - Legitimate automation tools
+#   - Your office IPs
+#   - Load balancers
+#   - Backup systems
+#   Format: Array of IP addresses (IPv4 or IPv6)
+whitelist_ips:
+  # Example: Office/Admin IPs
+  - "203.0.113.1"      # Main office IP
+  - "203.0.113.2"     # Secondary office IP
+  
+  # Example: Monitoring systems
+  - "198.51.100.10"    # Nagios/Zabbix server
+  - "198.51.100.11"    # Prometheus server
+  
+  # Example: VPN gateways
+  - "192.0.2.50"       # VPN gateway 1
+  - "192.0.2.51"       # VPN gateway 2
+  
+  # Example: Load balancers
+  - "192.0.2.100"      # Load balancer 1
+  - "192.0.2.101"      # Load balancer 2
+  
+  # Example: Backup systems
+  - "192.0.2.200"      # Backup server
+  
+  # Example: Automation/CI/CD
+  - "192.0.2.150"      # CI/CD server
+  
+  # Example: IPv6 addresses (if needed)
+  # - "2001:db8::1"
+  # - "2001:db8::2"
+
+# Storage Settings
+# ----------------
+# storage_path: Path to store alerts and blocked IPs
+#   Default: /var/lib/secrds/events.json
+#   Ensure directory exists and has proper permissions
+storage_path: /var/lib/secrds/events.json
+
+# Process Management
+# ------------------
+# pid_file: Path to PID file for process management
+#   Default: /var/run/secrds.pid
+#   Used by systemd service
+pid_file: /var/run/secrds.pid
+
+# Logging Settings
+# ----------------
+# log_level: Logging verbosity level
+#   Options: "debug", "info", "warn", "error"
+#   Recommended: "info" for production, "debug" for troubleshooting
+log_level: info
+
+# log_file: Path to log file
+#   Default: /var/log/secrds/agent.log
+#   Ensure directory exists and logrotate is configured
+log_file: /var/log/secrds/agent.log
+
+# Telegram Notifications
+# ----------------------
+# Configure Telegram bot for real-time alerts
+# 
+# To set up:
+# 1. Create a bot with @BotFather on Telegram
+# 2. Get your bot token
+# 3. Get your chat ID (use @userinfobot or check bot API)
+# 4. Add both below
+#
+# Alternative: Set environment variables:
+#   export TELEGRAM_BOT_TOKEN="your_bot_token"
+#   export TELEGRAM_CHAT_ID="your_chat_id"
+telegram:
+  # bot_token: Your Telegram bot token from @BotFather
+  #   Example: "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
+  bot_token: "YOUR_TELEGRAM_BOT_TOKEN_HERE"
+  
+  # chat_id: Your Telegram chat ID for receiving alerts
+  #   Can be:
+  #   - Your personal chat ID (number or string)
+  #   - Group chat ID (negative number)
+  #   - Channel username (e.g., "@my_channel")
+  #   Example: "123456789" or "-1001234567890" or "@my_channel"
+  chat_id: "YOUR_TELEGRAM_CHAT_ID_HERE"
+
+# ============================================
+# Enterprise Configuration Examples
+# ============================================
+
+# Example 1: Strict Security (High Sensitivity)
+# ----------------------------------------------
+# ssh_threshold: 3
+# ssh_window_seconds: 180
+# block_duration_seconds: 604800  # 7 days
+# enable_ip_blocking: true
+
+# Example 2: Balanced (Recommended for Most Environments)
+# --------------------------------------------------------
+# ssh_threshold: 5
+# ssh_window_seconds: 300
+# block_duration_seconds: 86400  # 24 hours
+# enable_ip_blocking: true
+
+# Example 3: Monitoring Only (No Blocking)
+# -----------------------------------------
+# ssh_threshold: 5
+# ssh_window_seconds: 300
+# enable_ip_blocking: false
+# block_duration_seconds: 0
+
+# Example 4: High Traffic Environment
+# -------------------------------------
+# ssh_threshold: 10
+# ssh_window_seconds: 600
+# tcp_threshold: 20
+# tcp_window_seconds: 120
+# block_duration_seconds: 86400
+
+# ============================================
+# Security Best Practices
+# ============================================
+#
+# 1. Always whitelist your monitoring systems
+# 2. Use block_duration_seconds > 0 for auto-recovery
+# 3. Monitor logs regularly: tail -f /var/log/secrds/agent.log
+# 4. Review blocked IPs: secrds stats
+# 5. Keep whitelist updated as infrastructure changes
+# 6. Test configuration in staging before production
+# 7. Set appropriate file permissions:
+#    chmod 600 /etc/secrds/config.yaml
+#    chown root:root /etc/secrds/config.yaml
+#
+# ============================================
+# Troubleshooting
+# ============================================
+#
+# If alerts are too frequent:
+#   - Increase ssh_threshold
+#   - Increase ssh_window_seconds
+#
+# If legitimate IPs are blocked:
+#   - Add to whitelist_ips
+#   - Check block_duration_seconds (enable auto-unblock)
+#
+# If no alerts are received:
+#   - Check Telegram bot_token and chat_id
+#   - Verify log_file for errors
+#   - Check systemd status: systemctl status secrds
+#
+# To view recent alerts:
+#   secrds alerts --limit 50
+#
+# To view statistics:
+#   secrds stats
+#
+# ============================================
+

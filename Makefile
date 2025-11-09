@@ -1,21 +1,28 @@
-.PHONY: build install clean test fmt clippy docker-build docker-run help
+.PHONY: build install clean test fmt clippy build-bpf help
 
 help:
 	@echo "Available targets:"
-	@echo "  build         - Build all components"
+	@echo "  build         - Build all Rust components"
+	@echo "  build-bpf     - Build eBPF programs"
 	@echo "  install       - Install to system (requires root)"
 	@echo "  clean         - Clean build artifacts"
 	@echo "  test          - Run tests"
 	@echo "  fmt           - Format code"
 	@echo "  clippy        - Run clippy linter"
-	@echo "  docker-build  - Build Docker image"
-	@echo "  docker-run    - Run Docker container"
 	@echo "  help          - Show this help"
 
-build:
+build: build-bpf
 	@echo "Building secrds Security Monitor..."
-	@chmod +x build.sh
-	@./build.sh
+	@cargo build --release
+	@echo "Build complete."
+
+build-bpf:
+	@echo "Building eBPF programs..."
+	@echo "Note: Aya eBPF build requires special setup."
+	@echo "See BUILD-EBPF.md for instructions."
+	@chmod +x build-ebpf.sh
+	@./build-ebpf.sh
+	@echo "eBPF build complete (may be placeholder)."
 
 install:
 	@echo "Installing secrds Security Monitor..."
@@ -24,24 +31,18 @@ install:
 
 clean:
 	@echo "Cleaning build artifacts..."
-	@cd secrds-programs && make clean || true
+	@cargo clean
 	@rm -rf target/release/secrds-*
+	@rm -rf target/bpfel-unknown-none
 
 test:
-	@echo "Running Go tests..."
-	@cd secrds-agent && go test ./... || true
-	@cd secrds-cli && go test ./... || true
+	@echo "Running Rust tests..."
+	@cargo test --workspace || true
 
 fmt:
-	@echo "Formatting Go code..."
-	@cd secrds-agent && go fmt ./... || true
-	@cd secrds-cli && go fmt ./... || true
+	@echo "Formatting Rust code..."
+	@cargo fmt --all || true
 
-docker-build:
-	@echo "Building Docker image..."
-	@docker build -t secrds:latest .
-
-docker-run:
-	@echo "Running Docker container..."
-	@docker-compose up -d
-
+clippy:
+	@echo "Running clippy linter..."
+	@cargo clippy --workspace || true

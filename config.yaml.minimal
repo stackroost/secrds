@@ -1,0 +1,29 @@
+# Minimal secrds Configuration
+# Copy to /etc/secrds/config.yaml and customize
+
+ssh_threshold: 5
+ssh_window_seconds: 300
+ssh_port: 22
+
+tcp_threshold: 10
+tcp_window_seconds: 60
+
+enable_ip_blocking: true
+block_duration_seconds: 86400  # 24 hours
+
+# Add your trusted IPs here (office, monitoring, etc.)
+whitelist_ips:
+  - "203.0.113.1"  # Your office IP
+  # - "198.51.100.10"  # Monitoring server
+  # - "192.0.2.50"     # VPN gateway
+
+storage_path: /var/lib/secrds/events.json
+pid_file: /var/run/secrds.pid
+
+log_level: info
+log_file: /var/log/secrds/agent.log
+
+telegram:
+  bot_token: "YOUR_BOT_TOKEN_HERE"
+  chat_id: "YOUR_CHAT_ID_HERE"
+
