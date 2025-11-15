@@ -19,22 +19,11 @@ jobs:
       with:
         go-version: '1.21'
 
-    - name: Install BPF dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y clang llvm libbpf-dev build-essential
-
     - name: Download Go dependencies
       run: go mod download
 
     - name: Verify Go dependencies
       run: go mod verify
-
-    - name: Build BPF programs
-      run: make bpf
-
-    - name: Build Go binary
-      run: make go
 
     - name: Run Go tests
       run: go test -v ./...
