@@ -1,8 +1,8 @@
-# Rust
-target/
-Cargo.lock
-**/*.rs.bk
-*.pdb
+# Build artifacts
+*.o
+*.so
+*.bpf.o
+secrds
 
 # IDE
 .vscode/
@@ -15,18 +15,9 @@ Cargo.lock
 .DS_Store
 Thumbs.db
 
-# Build artifacts
-*.o
-*.so
-*.bpf.o
-
 # Logs
 *.log
 logs/
-
-# Data
-data/
-*.json.bak
 
 # Environment
 .env

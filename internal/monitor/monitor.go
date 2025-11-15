@@ -24,52 +24,67 @@ import (
 	"secrds/internal/logger"
 )
 
-// AcceptEvent matches the struct in bpf/ssh_accept.bpf.c
 type AcceptEvent struct {
-	Pid   uint32
-	Tgid  uint32
-	Fd    int32
-	TsNs  uint64
-	Comm  [16]byte
+	Pid        uint32
+	Tgid       uint32
+	Fd         int32
+	TsNs       uint64
+	Comm       [16]byte
+	PeerIP     uint32   
+	PeerPort   uint16 
+	LocalIP    uint32   	
+	LocalPort  uint16   
+	HasSockInfo uint8 
+	_          [3]byte 
 }
 
-// Monitor handles SSH connection monitoring
+type AuthEvent struct {
+	Pid       uint32
+	Tgid      uint32
+	RetCode   int32   
+	TsNs      uint64
+	Comm      [16]byte
+	IsFailure uint8  
+	_         [3]byte  
+}
+
+
 type Monitor struct {
-	logger     *logger.Logger
-	collection *ebpf.Collection
-	links      []link.Link
-	reader     *perf.Reader
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	shuttingDown int32 // atomic flag for shutdown state
+	logger        *logger.Logger
+	collection    *ebpf.Collection
+	authCollection *ebpf.Collection 
+	links         []link.Link
+	reader        *perf.Reader
+	authReader    *perf.Reader      
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	shuttingDown  int32             
+	failureCounts map[string]int    
+	failureMutex  sync.RWMutex      
 }
 
-// NewMonitor creates a new monitor instance
 func NewMonitor(logger *logger.Logger) *Monitor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Monitor{
-		logger: logger,
-		links:  make([]link.Link, 0),
-		ctx:    ctx,
-		cancel: cancel,
+		logger:        logger,
+		links:         make([]link.Link, 0),
+		ctx:           ctx,
+		cancel:        cancel,
+		failureCounts: make(map[string]int),
 	}
 }
 
-// LoadBPF loads the BPF object file
 func (m *Monitor) LoadBPF(bpfObjFile string) error {
-	// Remove memory limits for eBPF
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return fmt.Errorf("failed to remove memlock limit: %w", err)
 	}
 
-	// Get absolute path
 	absPath, err := filepath.Abs(bpfObjFile)
 	if err != nil {
 		return fmt.Errorf("failed to get absolute path: %w", err)
 	}
 
-	// Load the BPF object
 	spec, err := ebpf.LoadCollectionSpec(absPath)
 	if err != nil {
 		return fmt.Errorf("failed to load BPF collection spec: %w", err)
@@ -85,9 +100,44 @@ func (m *Monitor) LoadBPF(bpfObjFile string) error {
 	return nil
 }
 
-// Attach attaches tracepoint programs
+func (m *Monitor) LoadAuthBPF(bpfObjFile string) error {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		return fmt.Errorf("failed to remove memlock limit: %w", err)
+	}
+
+	absPath, err := filepath.Abs(bpfObjFile)
+	if err != nil {
+		return fmt.Errorf("failed to get absolute path: %w", err)
+	}
+
+	spec, err := ebpf.LoadCollectionSpec(absPath)
+	if err != nil {
+		return fmt.Errorf("failed to load auth BPF collection spec: %w", err)
+	}
+
+	coll, err := ebpf.NewCollection(spec)
+	if err != nil {
+		return fmt.Errorf("failed to create auth BPF collection: %w", err)
+	}
+
+	m.authCollection = coll
+
+	return nil
+}
+
 func (m *Monitor) Attach() error {
-	// Attach accept4 tracepoint
+	progKretprobe := m.collection.Programs["kretprobe_inet_csk_accept"]
+	if progKretprobe != nil {
+		kp, err := link.Kretprobe("inet_csk_accept", progKretprobe, nil)
+		if err != nil {
+			m.logger.LogError("Failed to attach kretprobe inet_csk_accept: %v", err)
+			m.logger.LogInfo("Falling back to /proc/net/tcp parsing (may have race conditions)")
+		} else {
+			m.links = append(m.links, kp)
+			m.logger.LogInfo("Successfully attached kretprobe: inet_csk_accept (capturing IP/port directly from kernel)")
+		}
+	}
+
 	progAccept4 := m.collection.Programs["trace_exit_accept4"]
 	if progAccept4 != nil {
 		tpAccept4, err := link.Tracepoint("syscalls", "sys_exit_accept4", progAccept4, nil)
@@ -99,7 +149,6 @@ func (m *Monitor) Attach() error {
 		}
 	}
 
-	// Attach accept tracepoint
 	progAccept := m.collection.Programs["trace_exit_accept"]
 	if progAccept != nil {
 		tpAccept, err := link.Tracepoint("syscalls", "sys_exit_accept", progAccept, nil)
@@ -112,21 +161,91 @@ func (m *Monitor) Attach() error {
 	}
 
 	if len(m.links) == 0 {
-		return fmt.Errorf("failed to attach any tracepoint programs")
+		return fmt.Errorf("failed to attach any programs")
 	}
 
 	return nil
 }
 
-// StartPerfReader starts the perf event reader
+func (m *Monitor) AttachAuthUprobe() error {
+	if m.authCollection == nil {
+		return fmt.Errorf("auth BPF collection not loaded")
+	}
+	
+	pamLibPath := "/lib/x86_64-linux-gnu/libpam.so.0"
+	if _, err := os.Stat(pamLibPath); err != nil {
+		altPaths := []string{
+			"/usr/lib/x86_64-linux-gnu/libpam.so.0",
+			"/lib/libpam.so.0",
+			"/usr/lib/libpam.so.0",
+		}
+		found := false
+		for _, path := range altPaths {
+			if _, err := os.Stat(path); err == nil {
+				pamLibPath = path
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("libpam.so.0 not found in standard locations")
+		}
+	}
+
+	up, err := link.OpenExecutable(pamLibPath)
+	if err != nil {
+		return fmt.Errorf("failed to open executable %s: %w", pamLibPath, err)
+	}
+	
+	progUprobe := m.authCollection.Programs["uprobe_pam_authenticate"]
+	if progUprobe != nil {
+		uprobeLink, err := up.Uprobe("pam_authenticate", progUprobe, nil)
+		if err != nil {
+			m.logger.LogInfo("Symbol-based attachment failed, trying offset-based: %v", err)
+			uprobeLink, err = up.Uprobe("", progUprobe, &link.UprobeOptions{
+				Offset: 0x9940, 
+			})
+			if err != nil {
+				return fmt.Errorf("failed to attach uprobe to pam_authenticate (both symbol and offset failed): %w", err)
+			}
+			m.logger.LogInfo("Successfully attached uprobe using offset 0x9940")
+		} else {
+			m.logger.LogInfo("Successfully attached uprobe to pam_authenticate using symbol")
+		}
+		m.links = append(m.links, uprobeLink)
+	} else {
+		m.logger.LogError("uprobe_pam_authenticate program not found in BPF collection")
+	}
+
+	progUretprobe := m.authCollection.Programs["uretprobe_pam_authenticate"]
+	if progUretprobe != nil {
+		uretprobeLink, err := up.Uretprobe("pam_authenticate", progUretprobe, nil)
+		if err != nil {
+			m.logger.LogInfo("Symbol-based uretprobe attachment failed, trying offset-based: %v", err)
+			uretprobeLink, err = up.Uretprobe("", progUretprobe, &link.UprobeOptions{
+				Offset: 0x9940, 
+			})
+			if err != nil {
+				return fmt.Errorf("failed to attach uretprobe to pam_authenticate (both symbol and offset failed): %w", err)
+			}
+			m.logger.LogInfo("Successfully attached uretprobe using offset 0x9940")
+		} else {
+			m.logger.LogInfo("Successfully attached uretprobe to pam_authenticate using symbol")
+		}
+		m.links = append(m.links, uretprobeLink)
+	} else {
+		m.logger.LogError("uretprobe_pam_authenticate program not found in BPF collection")
+	}
+
+	return nil
+}
+
 func (m *Monitor) StartPerfReader() error {
-	// Get the events map
 	eventsMap := m.collection.Maps["events"]
 	if eventsMap == nil {
 		return fmt.Errorf("failed to find events map")
 	}
 
-	// Create perf reader
 	rd, err := perf.NewReader(eventsMap, 8*os.Getpagesize())
 	if err != nil {
 		return fmt.Errorf("failed to create perf reader: %w", err)
@@ -136,18 +255,34 @@ func (m *Monitor) StartPerfReader() error {
 	return nil
 }
 
-// ProcessEvents processes events from the perf reader
+func (m *Monitor) StartAuthPerfReader() error {
+	if m.authCollection == nil {
+		return fmt.Errorf("auth BPF collection not loaded")
+	}
+
+	eventsMap := m.authCollection.Maps["auth_events"]
+	if eventsMap == nil {
+		return fmt.Errorf("failed to find auth_events map")
+	}
+
+	rd, err := perf.NewReader(eventsMap, 8*os.Getpagesize())
+	if err != nil {
+		return fmt.Errorf("failed to create auth perf reader: %w", err)
+	}
+
+	m.authReader = rd
+	return nil
+}
+
 func (m *Monitor) ProcessEvents() {
 	m.wg.Add(1)
 	defer m.wg.Done()
 
 	for {
-		// Check if we're shutting down before blocking read
 		if atomic.LoadInt32(&m.shuttingDown) != 0 {
 			return
 		}
 
-		// Check if context is cancelled before blocking read
 		select {
 		case <-m.ctx.Done():
 			return
@@ -156,43 +291,35 @@ func (m *Monitor) ProcessEvents() {
 
 		record, err := m.reader.Read()
 		if err != nil {
-			// If we're shutting down, exit immediately without logging
 			if atomic.LoadInt32(&m.shuttingDown) != 0 {
 				return
 			}
 
-			// Check if context was cancelled (clean shutdown)
 			if m.ctx.Err() != nil {
 				return
 			}
 
-			// Check for closed reader errors (shutdown)
 			if err == perf.ErrClosed {
 				return
 			}
 
-			// Check if error message indicates file/ringbuffer is closed
 			errStr := err.Error()
 			if strings.Contains(errStr, "file already closed") ||
 				strings.Contains(errStr, "perf ringbuffer") ||
 				strings.Contains(errStr, "epoll wait") {
-				// Reader was closed, exit immediately
 				return
 			}
 
-			// Only log unexpected errors if not shutting down
 			if atomic.LoadInt32(&m.shuttingDown) == 0 {
 				m.logger.LogError("Error reading perf event: %v", err)
 			}
 			continue
 		}
 
-		// Check shutdown flag after successful read
 		if atomic.LoadInt32(&m.shuttingDown) != 0 {
 			return
 		}
 
-		// Check context again after successful read (in case shutdown happened during read)
 		select {
 		case <-m.ctx.Done():
 			return
@@ -204,7 +331,6 @@ func (m *Monitor) ProcessEvents() {
 			continue
 		}
 
-		// Parse the event
 		if len(record.RawSample) < int(unsafe.Sizeof(AcceptEvent{})) {
 			continue
 		}
@@ -212,51 +338,246 @@ func (m *Monitor) ProcessEvents() {
 		var ev AcceptEvent
 		reader := bytes.NewReader(record.RawSample)
 		if err := binary.Read(reader, binary.LittleEndian, &ev); err != nil {
-			// Try direct memory copy as fallback
 			ev = *(*AcceptEvent)(unsafe.Pointer(&record.RawSample[0]))
+		}
+		
+		comm := strings.TrimRight(string(ev.Comm[:]), "\x00")
+		if comm != "" {
+			m.logger.LogInfo("Received event: comm=%s, tgid=%d, fd=%d, has_sock_info=%d, raw_len=%d", 
+				comm, ev.Tgid, ev.Fd, ev.HasSockInfo, len(record.RawSample))
+		}
+
+		if ev.HasSockInfo == 1 {
+			peerIPOffset := 36
+			peerPortOffset := 40
+			localIPOffset := 42
+			localPortOffset := 46
+			if len(record.RawSample) >= 49 { 
+				ev.PeerIP = binary.BigEndian.Uint32(record.RawSample[peerIPOffset : peerIPOffset+4])
+				ev.PeerPort = binary.BigEndian.Uint16(record.RawSample[peerPortOffset : peerPortOffset+2])
+				ev.LocalIP = binary.BigEndian.Uint32(record.RawSample[localIPOffset : localIPOffset+4])
+				ev.LocalPort = binary.BigEndian.Uint16(record.RawSample[localPortOffset : localPortOffset+2])
+			} else {
+				ev.HasSockInfo = 0
+			}
 		}
 
 		m.handleEvent(&ev)
 	}
 }
 
-// handleEvent processes a single accept event
-func (m *Monitor) handleEvent(ev *AcceptEvent) {
-	// Get comm string (null-terminated)
+func (m *Monitor) ProcessAuthEvents() {
+	m.wg.Add(1)
+	defer m.wg.Done()
+
+	if m.authReader == nil {
+		return
+	}
+
+	for {
+		if atomic.LoadInt32(&m.shuttingDown) != 0 {
+			return
+		}
+
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+
+		record, err := m.authReader.Read()
+		if err != nil {
+			if atomic.LoadInt32(&m.shuttingDown) != 0 {
+				return
+			}
+
+			if m.ctx.Err() != nil {
+				return
+			}
+
+			if err == perf.ErrClosed {
+				return
+			}
+
+			errStr := err.Error()
+			if strings.Contains(errStr, "file already closed") ||
+				strings.Contains(errStr, "perf ringbuffer") ||
+				strings.Contains(errStr, "epoll wait") {
+				return
+			}
+
+			if atomic.LoadInt32(&m.shuttingDown) == 0 {
+				m.logger.LogError("Error reading auth perf event: %v", err)
+			}
+			continue
+		}
+
+		if atomic.LoadInt32(&m.shuttingDown) != 0 {
+			return
+		}
+
+		select {
+		case <-m.ctx.Done():
+			return
+		default:
+		}
+
+		if record.LostSamples > 0 {
+			m.logger.LogError("Lost %d auth samples", record.LostSamples)
+			continue
+		}
+
+		if len(record.RawSample) < int(unsafe.Sizeof(AuthEvent{})) {
+			continue
+		}
+
+		var ev AuthEvent
+		reader := bytes.NewReader(record.RawSample)
+		if err := binary.Read(reader, binary.LittleEndian, &ev); err != nil {
+			ev = *(*AuthEvent)(unsafe.Pointer(&record.RawSample[0]))
+		}
+
+		comm := strings.TrimRight(string(ev.Comm[:]), "\x00")
+		m.logger.LogInfo("Received auth event: comm=%s, tgid=%d, ret_code=%d, is_failure=%d, raw_len=%d",
+			comm, ev.Tgid, ev.RetCode, ev.IsFailure, len(record.RawSample))
+
+		m.handleAuthEvent(&ev)
+	}
+}
+
+func (m *Monitor) extractIPFromProcess(pid uint32) (string, error) {
+	fdDir := fmt.Sprintf("/proc/%d/fd", pid)
+	files, err := os.ReadDir(fdDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to read fd directory: %w", err)
+	}
+
+	for _, file := range files {
+		fdPath := fmt.Sprintf("%s/%s", fdDir, file.Name())
+		linkTarget, err := os.Readlink(fdPath)
+		if err != nil {
+			continue
+		}
+
+		if !strings.HasPrefix(linkTarget, "socket:[") {
+			continue
+		}
+
+		inode, err := parseInodeFromLink(linkTarget)
+		if err != nil {
+			continue
+		}
+
+		ip, _, _, err := inodeToIPPort(inode)
+		if err == nil && ip != "" && ip != "0.0.0.0" {
+			return ip, nil
+		}
+	}
+
+	return "", fmt.Errorf("no socket found for PID %d", pid)
+}
+
+func (m *Monitor) handleAuthEvent(ev *AuthEvent) {
 	comm := strings.TrimRight(string(ev.Comm[:]), "\x00")
 
-	// Attempt to resolve socket inode
-	inode, err := fdToInode(int(ev.Tgid), int(ev.Fd))
-	if err != nil {
-		m.logger.LogInfo("Could not resolve /proc/%d/fd/%d (maybe short-lived or permission)",
-			ev.Tgid, ev.Fd)
+	m.logger.LogInfo("Processing auth event: comm='%s', tgid=%d, ret_code=%d, is_failure=%d",
+		comm, ev.Tgid, ev.RetCode, ev.IsFailure)
+
+	if !strings.Contains(comm, "sshd") {
+		m.logger.LogInfo("Skipping non-sshd event: comm='%s'", comm)
 		return
 	}
+	
+	if comm != "sshd" {
+		idx := strings.Index(comm, "sshd")
+		if idx >= 0 {
+			comm = comm[idx:]
+		}
+	}
 
-	// Small delay to let socket appear in /proc/net/tcp and establish connection
-	time.Sleep(10 * time.Millisecond)
+	isFailure := ev.RetCode != 0
+	
+	var ip string
+	var err error
+	for retry := 0; retry < 5; retry++ {
+		if retry > 0 {
+			time.Sleep(time.Duration(retry*10) * time.Millisecond) 
+		}
+		ip, err = m.extractIPFromProcess(ev.Tgid)
+		if err == nil && ip != "" {
+			break
+		}
+	}
+	
+	if err != nil || ip == "" {
+		procPath := fmt.Sprintf("/proc/%d", ev.Tgid)
+		if _, err2 := os.Stat(procPath); err2 == nil {
+			time.Sleep(50 * time.Millisecond)
+			ip, err = m.extractIPFromProcess(ev.Tgid)
+		}
+		
+		if err != nil || ip == "" {
+			ip = "unknown"
+			m.logger.LogInfo("Could not extract IP for PID %d after retries, using fallback: %v", ev.Tgid, err)
+		}
+	}
 
-	// Try to get IP and port
-	ip, remPort, localPort, err := inodeToIPPort(inode)
-	if err != nil {
-		// Check if it's a Unix socket
+	if isFailure {
+		m.failureMutex.Lock()
+		m.failureCounts[ip]++
+		failureCount := m.failureCounts[ip]
+		m.failureMutex.Unlock()
+
+		m.logger.LogSSHDetected(ip, 0, ev.Tgid, comm)
+		m.logger.LogInfo("Authentication failure from %s (PAM return code: %d, is_failure flag: %d, total failures: %d)", 
+			ip, ev.RetCode, ev.IsFailure, failureCount)
+	} else {
+		m.failureMutex.Lock()
+		delete(m.failureCounts, ip)
+		m.failureMutex.Unlock()
+		m.logger.LogInfo("Successful authentication from %s (PID: %d)", ip, ev.Tgid)
+	}
+}
+
+func (m *Monitor) handleEvent(ev *AcceptEvent) {
+	comm := strings.TrimRight(string(ev.Comm[:]), "\x00")
+
+	var ip string
+	var remPort, localPort int
+
+	if ev.HasSockInfo == 1 {
+		ipBytes := make([]byte, 4)
+		binary.BigEndian.PutUint32(ipBytes, ev.PeerIP)
+		ip = fmt.Sprintf("%d.%d.%d.%d", ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3])
+
+		remPort = int(ev.PeerPort)
+		localPort = int(ev.LocalPort)
+		
+		m.logger.LogInfo("BPF captured: comm=%s, peer=%s:%d, local_port=%d, has_sock_info=%d", 
+			comm, ip, remPort, localPort, ev.HasSockInfo)
+	} else {
 		linkPath := fmt.Sprintf("/proc/%d/fd/%d", ev.Tgid, ev.Fd)
 		linkTarget, err := os.Readlink(linkPath)
-		if err == nil {
-			if strings.HasPrefix(linkTarget, "socket:") {
-				m.logger.LogInfo("inode=%d (socket may be Unix domain or already closed)", inode)
-			} else {
-				m.logger.LogInfo("inode=%d found but /proc/net/tcp lookup failed (fd: %s)", inode, linkTarget)
-			}
-		} else {
-			m.logger.LogInfo("inode=%d found but /proc/net/tcp lookup failed", inode)
+		if err != nil {
+			return
 		}
-		return
+
+		inode, err := parseInodeFromLink(linkTarget)
+		if err != nil {
+			return
+		}
+
+		time.Sleep(10 * time.Millisecond)
+
+		var err2 error
+		ip, remPort, localPort, err2 = inodeToIPPort(inode)
+		if err2 != nil {
+			return
+		}
 	}
 
-	// Check if it's SSH - check both local port (22 = listening) and remote port, or sshd process
 	isSSH := localPort == 22 || remPort == 22 || comm == "sshd"
-	
+
 	if isSSH {
 		m.logger.LogSSHDetected(ip, remPort, ev.Tgid, comm)
 	} else {
@@ -264,48 +585,37 @@ func (m *Monitor) handleEvent(ev *AcceptEvent) {
 	}
 }
 
-// Stop stops the monitor gracefully
 func (m *Monitor) Stop() {
-	// Set shutdown flag first
 	atomic.StoreInt32(&m.shuttingDown, 1)
 	
-	// Cancel context to signal goroutine to stop
 	m.cancel()
 	
-	// Close reader to unblock any Read() calls
 	if m.reader != nil {
 		m.reader.Close()
 	}
+	if m.authReader != nil {
+		m.authReader.Close()
+	}
 	
-	// Wait for ProcessEvents goroutine to finish
 	m.wg.Wait()
 }
 
-// Close closes all resources
 func (m *Monitor) Close() error {
-	// Stop the monitor first (graceful shutdown)
 	m.Stop()
 
-	// Close links
 	for _, l := range m.links {
 		l.Close()
 	}
-	// Close collection
 	if m.collection != nil {
 		m.collection.Close()
+	}
+	if m.authCollection != nil {
+		m.authCollection.Close()
 	}
 	return nil
 }
 
-// fdToInode resolves pid + fd -> socket inode
-func fdToInode(pid, fd int) (uint64, error) {
-	linkPath := fmt.Sprintf("/proc/%d/fd/%d", pid, fd)
-	linkTarget, err := os.Readlink(linkPath)
-	if err != nil {
-		return 0, err
-	}
-
-	// linkTarget will be "socket:[12345]" for sockets
+func parseInodeFromLink(linkTarget string) (uint64, error) {
 	start := strings.Index(linkTarget, "[")
 	end := strings.Index(linkTarget, "]")
 	if start == -1 || end == -1 || start >= end {
@@ -321,13 +631,9 @@ func fdToInode(pid, fd int) (uint64, error) {
 	return inode, nil
 }
 
-// inodeToIPPort finds IP and port from inode in /proc/net/tcp
-// Returns: remoteIP, remotePort, localPort, error
 func inodeToIPPort(inode uint64) (string, int, int, error) {
-	// Try multiple times with increasing delay (socket needs time to establish)
 	for retry := 0; retry < 10; retry++ {
 		if retry > 0 {
-			// Exponential backoff: 5ms, 10ms, 20ms, 40ms, 80ms, 160ms, etc.
 			delay := time.Duration(5*(1<<uint(retry-1))) * time.Millisecond
 			if delay > 200*time.Millisecond {
 				delay = 200 * time.Millisecond
@@ -335,13 +641,11 @@ func inodeToIPPort(inode uint64) (string, int, int, error) {
 			time.Sleep(delay)
 		}
 
-		// Try IPv4 first
 		ip, remPort, localPort, err := parseTCPFile("/proc/net/tcp", inode)
 		if err == nil {
 			return ip, remPort, localPort, nil
 		}
 
-		// Try IPv6 if IPv4 fails
 		ip, remPort, localPort, err = parseTCPFile("/proc/net/tcp6", inode)
 		if err == nil {
 			return ip, remPort, localPort, nil
@@ -351,8 +655,6 @@ func inodeToIPPort(inode uint64) (string, int, int, error) {
 	return "", 0, 0, fmt.Errorf("not found")
 }
 
-// parseTCPFile parses /proc/net/tcp and finds entry matching socket inode
-// Returns: remoteIP, remotePort, localPort, error
 func parseTCPFile(filename string, inode uint64) (string, int, int, error) {
 	file, err := os.Open(filename)
 	if err != nil {
@@ -362,89 +664,96 @@ func parseTCPFile(filename string, inode uint64) (string, int, int, error) {
 
 	scanner := bufio.NewScanner(file)
 
-	// Skip header line
 	if !scanner.Scan() {
 		return "", 0, 0, fmt.Errorf("empty file")
 	}
+	header := scanner.Text()
+	cols := strings.Fields(header)
+	var idxLocal, idxRem, idxSt, idxInode int = -1, -1, -1, -1
+	for i, c := range cols {
+		switch c {
+		case "local_address":
+			idxLocal = i
+		case "rem_address":
+			idxRem = i
+		case "st":
+			idxSt = i
+		case "inode":
+			idxInode = i
+		}
+	}
+	if idxLocal == -1 { idxLocal = 1 }
+	if idxRem == -1 { idxRem = 2 }
+	if idxSt == -1 { idxSt = 3 }
+	if idxInode == -1 { idxInode = len(cols)-1 } 
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		fields := strings.Fields(line)
-		if len(fields) < 12 {
+
+		if len(fields) <= idxInode || len(fields) <= idxRem || len(fields) <= idxLocal {
 			continue
 		}
 
-		// Parse: sl local_address rem_address st ...
-		if len(fields[1]) == 0 || fields[1][len(fields[1])-1] != ':' {
-			continue
-		}
-
-		// Extract ports
-		localParts := strings.Split(fields[1], ":")
-		remParts := strings.Split(fields[2], ":")
-		if len(localParts) != 2 || len(remParts) != 2 {
-			continue
-		}
-
-		// Parse local port
-		localPortHex := localParts[1]
-		localPort, err := strconv.ParseUint(localPortHex, 16, 32)
-		if err != nil {
-			continue
-		}
-
-		remPortHex := remParts[1]
-		remPort, err := strconv.ParseUint(remPortHex, 16, 32)
-		if err != nil {
-			continue
-		}
-
-		// Inode is second-to-last field (before ref count)
-		entryInodeStr := fields[len(fields)-2]
+		entryInodeStr := fields[idxInode]
 		entryInode, err := strconv.ParseUint(entryInodeStr, 10, 64)
 		if err != nil {
 			continue
 		}
-
-		if entryInode == inode && entryInode != 0 {
-			// Parse remote IP (hex format, big-endian byte order)
-			remIPHex := remParts[0]
-			
-			// Skip if remote address is 0.0.0.0:0000 (listening socket)
-			if remIPHex == "00000000" && remPort == 0 {
-				continue
-			}
-
-			remIPBytes, err := hex.DecodeString(remIPHex)
-			if err != nil || len(remIPBytes) != 4 {
-				continue
-			}
-
-			// Convert from hex to dotted decimal
-			ip := fmt.Sprintf("%d.%d.%d.%d",
-				remIPBytes[3], remIPBytes[2], remIPBytes[1], remIPBytes[0])
-
-			// Skip if IP is 0.0.0.0 (listening socket)
-			if ip == "0.0.0.0" {
-				continue
-			}
-
-			// Accept all states except LISTEN (0A)
-			// This includes ESTABLISHED (01), SYN_RECV (03), TIME_WAIT (06), etc.
-			state := "01" // default
-			if len(fields) > 3 {
-				state = fields[3]
-			}
-			
-			// Skip LISTEN state (0A) - these are listening sockets, not accepted connections
-			if state == "0A" {
-				continue
-			}
-
-			return ip, int(remPort), int(localPort), nil
+		if entryInode != inode || entryInode == 0 {
+			continue
 		}
+
+		localParts := strings.Split(fields[idxLocal], ":")
+		remParts := strings.Split(fields[idxRem], ":")
+		if len(localParts) != 2 || len(remParts) != 2 {
+			continue
+		}
+		localPortHex := localParts[1]
+		remPortHex := remParts[1]
+
+		localPort64, err := strconv.ParseUint(localPortHex, 16, 32)
+		if err != nil {
+			continue
+		}
+		remPort64, err := strconv.ParseUint(remPortHex, 16, 32)
+		if err != nil {
+			continue
+		}
+
+		if remParts[0] == "00000000" && remPortHex == "0000" {
+			continue
+		}
+
+		remIPHex := remParts[0]
+		remIP, err := hexIPv4ToDot(remIPHex)
+		if err != nil {
+			return "", 0, 0, fmt.Errorf("invalid rem ip hex")
+		}
+
+		if remIP == "0.0.0.0" {
+			continue
+		}
+
+		state := fields[idxSt]
+		if state == "0A" {
+			continue
+		}
+
+		return remIP, int(remPort64), int(localPort64), nil
 	}
 
 	return "", 0, 0, fmt.Errorf("inode not found")
 }
 
+func hexIPv4ToDot(hexStr string) (string, error) {
+	if len(hexStr) != 8 {
+		return "", fmt.Errorf("unexpected ipv4 hex length")
+	}
+	b, err := hex.DecodeString(hexStr)
+	if err != nil || len(b) != 4 {
+		return "", fmt.Errorf("decode failed")
+	}
+	ip := fmt.Sprintf("%d.%d.%d.%d", b[3], b[2], b[1], b[0])
+	return ip, nil
+}
