@@ -1,5 +1,0 @@
-[unstable]
-build-std = ["core"]
-
-[build]
-rustflags = ["-C", "panic=abort"]

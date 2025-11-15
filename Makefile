@@ -1,48 +1,17 @@
-.PHONY: build install clean test fmt clippy build-bpf help
+.PHONY: all bpf go clean
 
-help:
-	@echo "Available targets:"
-	@echo "  build         - Build all Rust components"
-	@echo "  build-bpf     - Build eBPF programs"
-	@echo "  install       - Install to system (requires root)"
-	@echo "  clean         - Clean build artifacts"
-	@echo "  test          - Run tests"
-	@echo "  fmt           - Format code"
-	@echo "  clippy        - Run clippy linter"
-	@echo "  help          - Show this help"
+all: bpf go
 
-build: build-bpf
-	@echo "Building secrds Security Monitor..."
-	@cargo build --release
-	@echo "Build complete."
+bpf:
+	clang -O2 -g -target bpf -c bpf/ssh_accept.bpf.c -o secrds.bpf.o
 
-build-bpf:
-	@echo "Building eBPF programs..."
-	@echo "Note: Aya eBPF build requires special setup."
-	@echo "See BUILD-EBPF.md for instructions."
-	@chmod +x build-ebpf.sh
-	@./build-ebpf.sh
-	@echo "eBPF build complete (may be placeholder)."
-
-install:
-	@echo "Installing secrds Security Monitor..."
-	@sudo chmod +x install.sh
-	@sudo ./install.sh
+go:
+	go mod download
+	go build -o secrds ./cmd/secrds
 
 clean:
-	@echo "Cleaning build artifacts..."
-	@cargo clean
-	@rm -rf target/release/secrds-*
-	@rm -rf target/bpfel-unknown-none
+	rm -f secrds secrds.bpf.o
 
-test:
-	@echo "Running Rust tests..."
-	@cargo test --workspace || true
+run: all
+	sudo ./secrds
 
-fmt:
-	@echo "Formatting Rust code..."
-	@cargo fmt --all || true
-
-clippy:
-	@echo "Running clippy linter..."
-	@cargo clippy --workspace || true
